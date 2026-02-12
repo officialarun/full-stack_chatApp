@@ -10,8 +10,6 @@ spec:
       app: backend
   template:
     metadata:
-      name: backend-pod
-      namespace: chat-app
       labels:
         app: backend
     spec:
@@ -23,3 +21,14 @@ spec:
           env:
             - name: NODE_ENV
               value: "production" 
+            - name: MONGODB_URI
+              # use the same user/password as set by the mongo init env vars in mongodb-deployment.yml
+              # initial root user is created as `admin` with password `production` there
+              value: "mongodb://admin:production@mongodb:27017/dbname?authSource=admin"
+            - name: PORT
+              value: "5001"
+            - name: JWT_SECRET
+              valueFrom: 
+                secretKeyRef:
+                  name: fullstack-chatapp-secret
+                  key: JWT_SECRET
