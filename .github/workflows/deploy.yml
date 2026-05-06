@@ -1,0 +1,290 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'k8s/**'
+      - '.github/workflows/**'
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.ap-south-1.amazonaws.com
+  BACKEND_IMAGE_NAME: chatapp-backend
+  FRONTEND_IMAGE_NAME: chatapp-frontend
+
+jobs:
+  # Job 1: Build and test backend
+  backend-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: 'backend/package-lock.json'
+
+      - name: Install dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Run linter
+        working-directory: backend
+        run: npm run lint --if-present
+
+      - name: Run tests
+        working-directory: backend
+        run: npm test --if-present
+
+      - name: Build
+        working-directory: backend
+        run: npm run build --if-present
+
+  # Job 2: Build and test frontend
+  frontend-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: 'frontend/package-lock.json'
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run linter
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+
+  # Job 3: Build Docker images and push to ECR
+  build-and-push:
+    needs: [backend-build, frontend-build]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push backend image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$BACKEND_IMAGE_NAME:$IMAGE_TAG \
+                       -t $ECR_REGISTRY/$BACKEND_IMAGE_NAME:latest \
+                       -f backend/Dockerfile backend/
+          docker push $ECR_REGISTRY/$BACKEND_IMAGE_NAME:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$BACKEND_IMAGE_NAME:latest
+          echo "backend_image=$ECR_REGISTRY/$BACKEND_IMAGE_NAME:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Build, tag, and push frontend image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$FRONTEND_IMAGE_NAME:$IMAGE_TAG \
+                       -t $ECR_REGISTRY/$FRONTEND_IMAGE_NAME:latest \
+                       -f frontend/Dockerfile frontend/
+          docker push $ECR_REGISTRY/$FRONTEND_IMAGE_NAME:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$FRONTEND_IMAGE_NAME:latest
+          echo "frontend_image=$ECR_REGISTRY/$FRONTEND_IMAGE_NAME:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Update Kubernetes manifests with new image tags
+        run: |
+          # Update kustomization files with new image tags
+          cd k8s/overlays/prod
+          kustomize edit set image \
+            $BACKEND_IMAGE_NAME=$ECR_REGISTRY/$BACKEND_IMAGE_NAME:${{ github.sha }} \
+            $FRONTEND_IMAGE_NAME=$ECR_REGISTRY/$FRONTEND_IMAGE_NAME:${{ github.sha }}
+
+      - name: Commit and push updated manifests
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add k8s/overlays/prod/kustomization.yml
+          git commit -m "Update image tags to ${{ github.sha }}" || echo "No changes to commit"
+          git push origin main || echo "Failed to push (possibly no changes)"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Job 4: Scan images for vulnerabilities
+  security-scan:
+    needs: [build-and-push]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Run ECR image scan
+        run: |
+          aws ecr start-image-scan \
+            --repository-name $BACKEND_IMAGE_NAME \
+            --image-id imageTag=${{ github.sha }} \
+            --region $AWS_REGION || true
+
+          aws ecr start-image-scan \
+            --repository-name $FRONTEND_IMAGE_NAME \
+            --image-id imageTag=${{ github.sha }} \
+            --region $AWS_REGION || true
+
+  # Job 5: Deploy via Argo CD
+  argocd-deploy:
+    needs: [build-and-push, security-scan]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Install ArgoCD CLI
+        run: |
+          curl -sSL -o argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x argocd
+          sudo mv argocd /usr/local/bin/
+
+      - name: Sync Argo CD application
+        run: |
+          argocd app sync chatapp-prod \
+            --server ${{ secrets.ARGOCD_SERVER }} \
+            --auth-token ${{ secrets.ARGOCD_TOKEN }} \
+            --grpc-web
+
+      - name: Wait for deployment
+        run: |
+          argocd app wait chatapp-prod \
+            --server ${{ secrets.ARGOCD_SERVER }} \
+            --auth-token ${{ secrets.ARGOCD_TOKEN }} \
+            --grpc-web \
+            --timeout 300
+
+  # Job 6: Run smoke tests
+  smoke-tests:
+    needs: [argocd-deploy]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Wait for services to be ready
+        run: sleep 30
+
+      - name: Run health checks
+        run: |
+          BACKEND_URL="https://chat.yourdomain.com/api/health"
+          FRONTEND_URL="https://chat.yourdomain.com"
+
+          for i in {1..10}; do
+            if curl -f -s $BACKEND_URL; then
+              echo "Backend health check passed"
+              break
+            fi
+            echo "Attempt $i failed, retrying..."
+            sleep 5
+          done
+
+          for i in {1..10}; do
+            if curl -f -s $FRONTEND_URL; then
+              echo "Frontend health check passed"
+              break
+            fi
+            echo "Attempt $i failed, retrying..."
+            sleep 5
+          done
+
+  # Job 7: Notify on failure
+  notify-failure:
+    needs: [backend-build, frontend-build, build-and-push, security-scan, argocd-deploy, smoke-tests]
+    runs-on: ubuntu-latest
+    if: failure()
+    steps:
+      - name: Notify Slack on failure
+        uses: slackapi/slack-github-action@v1
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          payload: |
+            {
+              "text": "Deployment failed for ${{ github.repository }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Deployment Failed*\n*Repository:* ${{ github.repository }}\n*Branch:* ${{ github.ref }}\n*Commit:* ${{ github.sha }}"
+                  }
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Workflow"
+                      },
+                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    }
+                  ]
+                }
+              ]
+            }
+
+  # Job 8: Notify on success
+  notify-success:
+    needs: [backend-build, frontend-build, build-and-push, security-scan, argocd-deploy, smoke-tests]
+    runs-on: ubuntu-latest
+    if: success()
+    steps:
+      - name: Notify Slack on success
+        uses: slackapi/slack-github-action@v1
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          payload: |
+            {
+              "text": "Deployment successful for ${{ github.repository }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Deployment Successful*\n*Repository:* ${{ github.repository }}\n*Branch:* ${{ github.ref }}\n*Commit:* ${{ github.sha }}\n*Image:* `${{ github.sha }}`"
+                  }
+                }
+              ]
+            }

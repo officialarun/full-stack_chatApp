@@ -1,0 +1,17 @@
+# Kustomize base for overlays
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: chatapp
+resources:
+  - ../namespace/namespace.yml
+  - ../mongodb/mongodb.yml
+  - ../backend/backend.yml
+  - ../frontend/frontend.yml
+  - ../ingress/ingress.yml
+
+commonLabels:
+  app: chatapp
+  managed-by: kustomize
+
+commonAnnotations:
+  managed-by: "terraform-and-argocd"

@@ -1,0 +1,160 @@
+# MongoDB ConfigMap for replica set and storage settings
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongodb-config
+  namespace: chatapp
+data:
+  init-replica-set.js: |
+    rs.initiate({
+      _id: "rs0",
+      members: [
+        { _id: 0, host: "mongodb-0.mongodb.chatapp.svc.cluster.local:27017" },
+        { _id: 1, host: "mongodb-1.mongodb.chatapp.svc.cluster.local:27017" },
+        { _id: 2, host: "mongodb-2.mongodb.chatapp.svc.cluster.local:27017" }
+      ]
+    })
+---
+# MongoDB Secret for credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mongodb-credentials
+  namespace: chatapp
+type: Opaque
+stringData:
+  MONGO_INITDB_ROOT_USERNAME: admin
+  MONGO_INITDB_ROOT_PASSWORD: changeme123  # Change in production
+  MONGODB_URI: "mongodb://admin:changeme123@mongodb-0.mongodb.chatapp.svc.cluster.local:27017,mongodb-1.mongodb.chatapp.svc.cluster.local:27017,mongodb-2.mongodb.chatapp.svc.cluster.local:27017/chatapp?authSource=admin&replicaSet=rs0"
+---
+# MongoDB StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongodb
+  namespace: chatapp
+spec:
+  serviceName: mongodb
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mongodb
+  template:
+    metadata:
+      labels:
+        app: mongodb
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - mongodb
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: mongodb
+          image: mongo:6.0
+          ports:
+            - containerPort: 27017
+              name: mongodb
+              protocol: TCP
+          volumeMounts:
+            - name: mongodb-data
+              mountPath: /data/db
+            - name: mongodb-config
+              mountPath: /scripts
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-credentials
+                  key: MONGO_INITDB_ROOT_USERNAME
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-credentials
+                  key: MONGO_INITDB_ROOT_PASSWORD
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - mongosh --eval "db.adminCommand('ping')" --username $MONGO_INITDB_ROOT_USERNAME --password $MONGO_INITDB_ROOT_PASSWORD
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - mongosh --eval "rs.status()" --username $MONGO_INITDB_ROOT_USERNAME --password $MONGO_INITDB_ROOT_PASSWORD
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+      terminationGracePeriodSeconds: 30
+  volumeClaimTemplates:
+    - metadata:
+        name: mongodb-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+        storageClassName: ebs-sc
+---
+# MongoDB Headless Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  namespace: chatapp
+spec:
+  clusterIP: None
+  selector:
+    app: mongodb
+  ports:
+    - port: 27017
+      targetPort: 27017
+      name: mongodb
+  publishNotReadyAddresses: true
+---
+# MongoDB ClusterIP Service for client connections
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb-client
+  namespace: chatapp
+spec:
+  type: ClusterIP
+  selector:
+    app: mongodb
+  ports:
+    - port: 27017
+      targetPort: 27017
+      name: mongodb
+---
+# StorageClass for EBS volumes
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ebs-sc
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+  iops: "3000"
+  throughput: "125"
+  encrypted: "true"
+allowVolumeExpansion: true

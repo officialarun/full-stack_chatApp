@@ -1,0 +1,80 @@
+# Production Environment Kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: chatapp
+resources:
+  - ../base
+
+replicas:
+  - name: backend
+    count: 3
+  - name: frontend
+    count: 3
+  - name: mongodb
+    count: 3
+
+images:
+  - name: dockerhub0600/chatapp-backend
+    newTag: "1.0.0"  # Use specific version tags in production
+  - name: dockerhub0600/chatapp-frontend
+    newTag: "1.0.0"
+
+patchesStrategicMerge:
+  - |-
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: backend
+    spec:
+      replicas: 3
+      template:
+        spec:
+          containers:
+          - name: backend
+            resources:
+              requests:
+                memory: "256Mi"
+                cpu: "200m"
+              limits:
+                memory: "512Mi"
+                cpu: "500m"
+  - |-
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: frontend
+    spec:
+      replicas: 3
+      template:
+        spec:
+          containers:
+          - name: frontend
+            resources:
+              requests:
+                memory: "128Mi"
+                cpu: "100m"
+              limits:
+                memory: "256Mi"
+                cpu: "200m"
+
+configMapGenerator:
+  - name: backend-config
+    behavior: merge
+    literals:
+      - NODE_ENV=production
+      - LOG_LEVEL=warn
+      - CORS_ORIGIN=https://chat.yourdomain.com
+  - name: frontend-config
+    behavior: merge
+    literals:
+      - VITE_API_URL=https://chat.yourdomain.com/api
+      - NODE_ENV=production
+
+secretGenerator:
+  - name: backend-secrets
+    behavior: merge
+    envs:
+      - secrets.env
+
+commonLabels:
+  environment: production

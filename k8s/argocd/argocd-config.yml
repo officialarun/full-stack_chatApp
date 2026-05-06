@@ -1,0 +1,48 @@
+# Argo CD Installation manifest
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argocd
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cmd-params-cm
+  namespace: argocd
+data:
+  # Disable RBAC checks for simple setup (enable in production)
+  # application.instanceLabelKey: argocd.argoproj.io/instance
+  server.insecure: "false"
+  server.basehref: "/"
+  # Application auto-sync window (UTC)
+  application.revisionHistoryLimit: "3"
+---
+# Argo CD Repository secret for GitHub
+apiVersion: v1
+kind: Secret
+metadata:
+  name: github-repo
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+type: Opaque
+stringData:
+  type: git
+  url: https://github.com/officialarun/full-stack_chatApp.git
+  password: ghp_your_github_token_here
+  username: officialarun
+---
+# Argo CD RBAC (optional: limit access in production)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-rbac-cm
+  namespace: argocd
+data:
+  policy.default: role:viewer
+  policy.csv: |
+    p, role:admin, applications, *, */*, allow
+    p, role:admin, repositories, *, *, allow
+    p, role:viewer, applications, get, */*, allow
+    p, role:viewer, repositories, get, *, allow
+    g, officialarun, role:admin

@@ -23,3 +23,8 @@ dist-ssr
 *.sln
 *.sw?
 
+*.md
+!README.md
+Makefile
+!README-DEVOPS.md
+
