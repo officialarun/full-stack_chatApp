@@ -50,7 +50,11 @@ volumes:
 
 
 
-
+## To run this application:
+# 1. Ensure Docker and Docker Compose are installed on your machine.
+# 2. Navigate to the directory containing this docker-compose.yml file.
+# 3. Run the command: docker-compose up --build
+# 4. Access the frontend at http://localhost:8080 and the backend API at http://localhost:5001/api  
 
 
 
